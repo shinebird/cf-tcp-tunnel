@@ -1,0 +1,12 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "private-tcp-tunnel",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-01",
+  "durable_objects": {
+    "bindings": [{ "name": "HUB", "class_name": "TunnelHub" }]
+  },
+  "exports": {
+    "TunnelHub": { "type": "durable-object", "storage": "sqlite" }
+  }
+}
