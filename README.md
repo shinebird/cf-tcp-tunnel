@@ -7,8 +7,8 @@ Proof-of-concept for **arbitrary TCP byte streams**, not UDP. Requires Python 3.
 ```powershell
 cd cf-tcp-tunnel
 npx wrangler login
-npx wrangler secret put TCP_TUNNEL_AGENT_TOKEN
-npx wrangler secret put TCP_TUNNEL_CLIENT_TOKEN
+npx wrangler secret put AGENT_TOKEN
+npx wrangler secret put CLIENT_TOKEN
 ```
 
 Set the non-secret allowlist in `wrangler.jsonc`, alongside `main`:
@@ -36,13 +36,13 @@ py -m pip install -r requirements.txt
 On LAN Windows host:
 
 ```powershell
-py tunnel.py agent --url wss://YOUR-WORKER.workers.dev --token YOUR_TCP_TUNNEL_AGENT_TOKEN --ports 3389
+py tunnel.py agent --url wss://YOUR-WORKER.workers.dev --token YOUR_AGENT_TOKEN --ports 3389
 ```
 
 On remote Windows host:
 
 ```powershell
-py tunnel.py client --url wss://YOUR-WORKER.workers.dev --token YOUR_TCP_TUNNEL_CLIENT_TOKEN --listen-port 13389 --remote-port 3389
+py tunnel.py client --url wss://YOUR-WORKER.workers.dev --token YOUR_CLIENT_TOKEN --listen-port 13389 --remote-port 3389
 ```
 
 Connect RDP to `127.0.0.1:13389`.
