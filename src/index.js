@@ -48,6 +48,7 @@ export class TunnelHub extends DurableObject {
       }
     }
     if (this.nextId > 0xffffffff) this.nextId = 1;
+    console.info('TunnelHub initialized', JSON.stringify({ restoredAgent: this.isOnline(this.agent), restoredSessions: this.clients.size }));
   }
 
   async fetch(request) {
@@ -62,6 +63,7 @@ export class TunnelHub extends DurableObject {
     // No server.accept() or addEventListener(): these prevent hibernation.
     if (isAgent) {
       const oldAgent = this.agent;
+      console.info('Agent attached', JSON.stringify({ replacingExistingAgent: this.isOnline(oldAgent), activeSessions: this.clients.size }));
       // Shut down sessions bound to the old agent before replacing it.
       for (const [id, entry] of this.clients) {
         this.clients.delete(id);
@@ -77,6 +79,7 @@ export class TunnelHub extends DurableObject {
       this.ctx.acceptWebSocket(server);
       server.serializeAttachment({ role: 'client', id, port, ready: false });
       this.clients.set(id, { ws: server, port, ready: false });
+      console.info('Client session opened', JSON.stringify({ id, port }));
       this.sendAgent({ type: 'open', id, port });
     }
     return new Response(null, { status: 101, webSocket: client });
@@ -84,20 +87,21 @@ export class TunnelHub extends DurableObject {
 
   isOnline(ws) { return ws?.readyState === WebSocket.OPEN; }
   closeSocket(ws, code, reason) {
-    if (ws) { try { ws.close(code, reason); } catch {} }
+    if (ws) { try { ws.close(code, reason); } catch (error) { console.warn('closeSocket failed', String(error)); } }
   }
   allocateId() {
     // Prevent stale messages from being routed to an earlier connection.
     for (let n = 0; n <= MAX_SESSIONS + 1; n++) {
       const id = this.nextId++ >>> 0;
       if (this.nextId > 0xffffffff) this.nextId = 1;
+    console.info('TunnelHub initialized', JSON.stringify({ restoredAgent: this.isOnline(this.agent), restoredSessions: this.clients.size }));
       if (id && !this.clients.has(id)) return id;
     }
     throw new Error('Session identifiers exhausted');
   }
   sendAgent(msg) {
     if (this.isOnline(this.agent)) {
-      try { this.agent.send(JSON.stringify(msg)); } catch {}
+      try { this.agent.send(JSON.stringify(msg)); } catch (error) { console.error('sendAgent failed', String(error)); this.closeSocket(this.agent, 1011, 'Agent send failure'); }
     }
   }
   sendAgentBinary(id, payload) {
@@ -105,7 +109,7 @@ export class TunnelHub extends DurableObject {
     const frame = new Uint8Array(4 + payload.length);
     new DataView(frame.buffer).setUint32(0, id, false);
     frame.set(payload, 4);
-    try { this.agent.send(frame); } catch {}
+    try { this.agent.send(frame); } catch (error) { console.error('sendAgentBinary failed', String(error), 'bytes', frame.byteLength); this.closeSocket(this.agent, 1011, 'Agent send failure'); }
   }
 
   async webSocketMessage(ws, data) {
@@ -155,10 +159,14 @@ export class TunnelHub extends DurableObject {
 
   // Hibernation API dispatches close/error events to class handlers, not listeners.
   async webSocketClose(ws, code, reason, wasClean) {
+    const meta = ws.deserializeAttachment();
+    console.warn('WebSocket closed', JSON.stringify({ role: meta?.role, id: meta?.id, code, reason: String(reason).slice(0, 120), wasClean }));
     this.cleanup(ws);
     this.closeSocket(ws, code === 1005 || code === 1006 ? 1000 : code, String(reason || '').slice(0, 120));
   }
   async webSocketError(ws, error) {
+    const meta = ws.deserializeAttachment();
+    console.error('WebSocket error', JSON.stringify({ role: meta?.role, id: meta?.id, error: String(error) }));
     this.cleanup(ws);
     this.closeSocket(ws, 1011, 'WebSocket error');
   }
@@ -166,6 +174,7 @@ export class TunnelHub extends DurableObject {
     const meta = ws.deserializeAttachment();
     if (meta?.role === 'agent') {
       if (this.agent !== ws) return;
+      console.warn('Agent disconnected; closing active sessions', JSON.stringify({ sessions: this.clients.size }));
       this.agent = null;
       for (const [id, entry] of this.clients) {
         this.clients.delete(id);

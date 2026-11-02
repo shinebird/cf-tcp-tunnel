@@ -6,6 +6,7 @@ import contextlib
 import json
 import logging
 import struct
+import sys
 
 from websockets.asyncio.client import connect
 
@@ -36,7 +37,7 @@ async def agent_once(args):
     allowed = set(args.ports)
     target_host = args.target_host
     async with connect(ws_url(args.url, '/agent'), additional_headers={'Authorization': f'Bearer {args.token}'},
-                       max_size=MAX_FRAME + 4096, ping_interval=20, ping_timeout=20) as ws:
+                       max_size=MAX_FRAME + 4096, ping_interval=20, ping_timeout=30, open_timeout=30, close_timeout=5) as ws:
         LOG.info('Agent connected: %s; allowed TCP ports: %s', args.url, sorted(allowed))
 
         async def serve(sid, port, queue):
@@ -140,7 +141,7 @@ async def proxy_connection(reader, writer, args):
     try:
         async with connect(ws_url(args.url, '/connect', args.remote_port),
                            additional_headers={'Authorization': f'Bearer {args.token}'},
-                           max_size=MAX_FRAME + 4096, ping_interval=20, ping_timeout=20) as ws:
+                           max_size=MAX_FRAME + 4096, ping_interval=20, ping_timeout=30, open_timeout=30, close_timeout=5) as ws:
             first = await asyncio.wait_for(ws.recv(), timeout=15)
             response = json.loads(first) if isinstance(first, str) else {}
             if response.get('type') != 'ready':
@@ -198,6 +199,10 @@ def main():
     client_p.add_argument('--listen-port', required=True, type=int)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+    # Windows Proactor can emit WinError 10022 during socket shutdown.
+    # Selector is often more predictable for this socket-only application.
+    if sys.platform == 'win32':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     try:
         asyncio.run(agent(args) if args.mode == 'agent' else client(args))
     except KeyboardInterrupt:
