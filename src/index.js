@@ -10,11 +10,11 @@ export default {
     const url = new URL(request.url);
     if (request.method !== 'GET' || request.headers.get('Upgrade')?.toLowerCase() !== 'websocket')
       return new Response('WebSocket required', { status: 426 });
-    if (!env.AGENT_TOKEN || !env.CLIENT_TOKEN)
+    if (!env.TCP_TUNNEL_AGENT_TOKEN || !env.TCP_TUNNEL_CLIENT_TOKEN)
       return new Response('Missing secrets', { status: 503 });
     const agent = url.pathname === '/agent';
     if (!agent && url.pathname !== '/connect') return new Response('Not found', { status: 404 });
-    const expected = agent ? env.AGENT_TOKEN : env.CLIENT_TOKEN;
+    const expected = agent ? env.TCP_TUNNEL_AGENT_TOKEN : env.TCP_TUNNEL_CLIENT_TOKEN;
     if (request.headers.get('Authorization') !== `Bearer ${expected}`)
       return new Response('Unauthorized', { status: 401 });
     if (!agent) {
