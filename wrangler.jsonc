@@ -4,9 +4,26 @@
   "main": "src/index.js",
   "compatibility_date": "2026-10-01",
   "durable_objects": {
-    "bindings": [{ "name": "HUB", "class_name": "TunnelHub" }]
+    "bindings": [
+      {
+        "name": "HUB",
+        "class_name": "TunnelHub"
+      }
+    ]
   },
   "exports": {
-    "TunnelHub": { "type": "durable-object", "storage": "sqlite" }
+    "TunnelHub": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "observability": {
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true
+    }
+  },
+  "vars": {
+    "ALLOWED_PORTS": "22,3389,8080, 8081, 8083"
   }
 }
