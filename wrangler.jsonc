@@ -18,12 +18,25 @@
     }
   },
   "observability": {
+    "enabled": false,
+    "head_sampling_rate": 1,
+    "redact_query_string": false,
     "logs": {
       "enabled": true,
-      "invocation_logs": true
+      "head_sampling_rate": 1,
+      "invocation_logs": true,
+      "persist": true
+    },
+    "traces": {
+      "enabled": false,
+      "head_sampling_rate": 1,
+      "persist": true
+    },
+    "issue_detection": {
+      "enabled": true
     }
   },
   "vars": {
-    "ALLOWED_PORTS": "22,3389,8080, 8081, 8083"
+    "ALLOWED_PORTS": "22,3389,8080,8081,8083"
   }
 }
