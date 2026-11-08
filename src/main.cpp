@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <charconv>
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
@@ -40,15 +41,29 @@ constexpr std::size_t MAX_QUEUE = 4 * 1024 * 1024;
 void log(std::string const& s) { std::cerr << s << '\n'; }
 
 struct Options {
-    std::string mode, url, token, connect_host, target_host="127.0.0.1", listen_host="127.0.0.1";
+    std::string mode, url, token, connect_host, agent_id="main", target_host="127.0.0.1", listen_host="127.0.0.1";
     unsigned listen_port=0, remote_port=0;
     std::vector<unsigned> ports;
     bool insecure_skip_verify = false;
+    // Native WebSocket control Ping/Pong is handled by the Cloudflare runtime,
+    // without dispatching a Durable Object JavaScript event.
+    unsigned ws_idle_timeout=90;
+    // Keep a much less frequent application-level check: protocol Pong alone
+    // doesn't prove that this is still the DO's current registered Agent.
+    unsigned app_probe_interval=600, app_probe_timeout=90;
 };
 unsigned port_number(std::string const& s) {
     auto n = std::stoul(s);
     if (n == 0 || n > 65535) throw std::runtime_error("port must be 1..65535");
     return static_cast<unsigned>(n);
+}
+unsigned seconds_option(std::string const& s, bool allow_zero=false) {
+    unsigned n=0;
+    auto [end, ec]=std::from_chars(s.data(),s.data()+s.size(),n);
+    if(ec!=std::errc{} || end!=s.data()+s.size() || n>86400 || (!allow_zero && n==0))
+        throw std::runtime_error("Seconds must be an integer in " +
+                                 std::string(allow_zero ? "0..86400" : "1..86400"));
+    return n;
 }
 Options parse(int argc, char** argv) {
     if (argc < 2) throw std::runtime_error("Specify 'agent' or 'client'");
@@ -64,6 +79,10 @@ Options parse(int argc, char** argv) {
         if (k=="--url") o.url=v;
         else if (k=="--token") o.token=v;
         else if (k=="--connect-host") o.connect_host=v;
+        else if (k=="--agent-id") o.agent_id=v;
+        else if (k=="--ws-idle-timeout") o.ws_idle_timeout=seconds_option(v);
+        else if (k=="--app-probe-interval") o.app_probe_interval=seconds_option(v,true);
+        else if (k=="--app-probe-timeout") o.app_probe_timeout=seconds_option(v);
         else if (k=="--target-host") o.target_host=v;
         else if (k=="--listen-host") o.listen_host=v;
         else if (k=="--listen-port") o.listen_port=port_number(v);
@@ -76,6 +95,12 @@ Options parse(int argc, char** argv) {
         } else throw std::runtime_error("Unknown argument: "+k);
     }
     if (o.url.empty() || o.token.empty()) throw std::runtime_error("--url and --token required");
+    if (o.agent_id.empty() || o.agent_id.size() > 64 ||
+        !std::all_of(o.agent_id.begin(), o.agent_id.end(), [](char c) {
+            return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
+        }) || (!(o.agent_id[0] >= 'a' && o.agent_id[0] <= 'z') &&
+                 !(o.agent_id[0] >= '0' && o.agent_id[0] <= '9')))
+        throw std::runtime_error("--agent-id must be lowercase alphanumeric, - or _, up to 64 chars; first character alphanumeric");
     if (!o.connect_host.empty()) {
         // Accept DNS names, IPv4 literals, or unbracketed IPv6 literals.
         // Port and URL scheme remain controlled by --url.
@@ -116,7 +141,8 @@ std::string host_header(Url const& u) {return u.host+(u.port=="443"?"":":"+u.por
 
 awaitable<std::shared_ptr<Wss>> connect_wss(ssl::context& ctx, Url const& url,
                                              std::string const& path, std::string const& token,
-                                             std::string const& connect_host) {
+                                             std::string const& connect_host,
+                                             unsigned ws_idle_timeout) {
     auto ex=co_await net::this_coro::executor;
     tcp::resolver resolver(ex);
     auto eps=co_await resolver.async_resolve(connect_host.empty() ? url.host : connect_host,
@@ -130,11 +156,18 @@ awaitable<std::shared_ptr<Wss>> connect_wss(ssl::context& ctx, Url const& url,
         ws->next_layer().set_verify_callback(ssl::host_name_verification(url.host));
     co_await ws->next_layer().async_handshake(ssl::stream_base::client,use_awaitable);
     beast::get_lowest_layer(*ws).expires_never();
-    ws->set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
+    // With idle_timeout=90 s, Beast sends a native control Ping after 45 s
+    // without incoming data/control frames, and times out after 90 s without
+    // inbound activity. Automatic Pong responses reset the timeout.
+    // Beast coordinates its own pings with application writes. Do not add a
+    // second async_write loop or a Worker-side heartbeat interval.
+    // Keep async_read outstanding to process Pong and deliver timeout errors.
+    ws->set_option(websocket::stream_base::timeout{
+        30s, std::chrono::seconds(ws_idle_timeout), true});
     ws->read_message_max(FRAME + 4096);
     ws->set_option(websocket::stream_base::decorator([token](websocket::request_type& req){
         req.set(beast::http::field::authorization, "Bearer " + token);
-        req.set(beast::http::field::user_agent, "cf-tcp-tunnel-cpp/1.0");
+        req.set(beast::http::field::user_agent, "cf-tcp-tunnel-cpp/1.1-hibernation");
     }));
     co_await ws->async_handshake(host_header(url),url.base+path,use_awaitable);
     co_return ws;
@@ -204,16 +237,24 @@ struct Session : std::enable_shared_from_this<Session> {
 struct Agent : std::enable_shared_from_this<Agent> {
     std::shared_ptr<Wss> ws;
     Queue out;
+    net::steady_timer probeTimer;
+    unsigned appProbeInterval, appProbeTimeout;
+    bool appProbePending=false;
+    std::uint64_t lastPingNonce=0;
     std::map<std::uint32_t,std::shared_ptr<Session>> sessions;
     std::string target;
     std::vector<unsigned> ports;
     bool stopped=false;
     Agent(std::shared_ptr<Wss> w,net::any_io_executor ex,Options const& o)
-        : ws(std::move(w)),out(ex),target(o.target_host),ports(o.ports){}
+        : ws(std::move(w)),out(ex),probeTimer(ex),
+          appProbeInterval(o.app_probe_interval),appProbeTimeout(o.app_probe_timeout),
+          target(o.target_host),ports(o.ports){}
     void stop() {
         if(stopped)return;
         stopped=true;
-        out.stop(); terminate(*ws);
+        out.stop();
+        beast::error_code ignore; probeTimer.cancel(ignore);
+        terminate(*ws);
         auto copy=std::move(sessions);sessions.clear();
         for(auto& [id,s]:copy) s->stop();
     }
@@ -222,6 +263,41 @@ struct Agent : std::enable_shared_from_this<Agent> {
         json::object o{{"type",type},{"id",id}};
         if(!message.empty())o["message"]=message;
         send(control(std::move(o)));
+    }
+    awaitable<void> application_probe() {
+        if (appProbeInterval==0) co_return;
+        try {
+            while(!stopped) {
+                // This timer runs on the LOCAL Agent, not in the Durable Object.
+                probeTimer.expires_after(std::chrono::seconds(appProbeInterval));
+                beast::error_code ec;
+                co_await probeTimer.async_wait(net::redirect_error(use_awaitable,ec));
+                if (stopped) break;
+                if (ec) continue;
+
+                // Only one probe is outstanding. Its own deadline avoids the
+                // old problem where a later nonce invalidated a delayed Pong.
+                appProbePending=true;
+                probeTimer.expires_after(std::chrono::seconds(appProbeTimeout));
+                json::object ping{{"type","ping"},{"nonce",++lastPingNonce}};
+                if (!send(control(std::move(ping)))) break;
+                ec.clear();
+                co_await probeTimer.async_wait(net::redirect_error(use_awaitable,ec));
+                if (stopped) break;
+                if (appProbePending) {
+                    log("Agent application probe timed out (no matching Worker JSON pong); forcing reconnect");
+                    stop();
+                    break;
+                }
+                // A matching JSON Pong clears pending and cancels this wait.
+                // Native protocol Pong frames do not complete this probe.
+            }
+        } catch(std::exception const& e) {
+            if (!stopped) {
+                log(std::string("Agent application probe error: ")+e.what());
+                stop();
+            }
+        }
     }
     awaitable<void> sender() {
         try {
@@ -235,6 +311,7 @@ struct Agent : std::enable_shared_from_this<Agent> {
     awaitable<void> receiver() {
         auto ex=co_await net::this_coro::executor;
         net::co_spawn(ex,[self=shared_from_this()]()->awaitable<void>{co_await self->sender();},net::detached);
+        net::co_spawn(ex,[self=shared_from_this()]()->awaitable<void>{co_await self->application_probe();},net::detached);
         try {
             while(!stopped) {
                 beast::flat_buffer b;
@@ -246,7 +323,18 @@ struct Agent : std::enable_shared_from_this<Agent> {
                     if(ec || !value.is_object())continue;
                     auto const& o=value.as_object();
                     auto* t=o.if_contains("type");auto* idv=o.if_contains("id");
-                    if(!t||!t->is_string()||!idv||!idv->is_int64()) continue;
+                    if (!t || !t->is_string()) continue;
+                    if (t->as_string() == "pong") {
+                        auto* nonce=o.if_contains("nonce");
+                        if (appProbePending && nonce && nonce->is_int64() && nonce->as_int64()>0 &&
+                            static_cast<std::uint64_t>(nonce->as_int64())==lastPingNonce) {
+                            appProbePending=false;
+                            beast::error_code ignore;
+                            probeTimer.cancel(ignore);
+                        }
+                        continue;
+                    }
+                    if(!idv||!idv->is_int64()) continue;
                     auto id64=idv->as_int64();
                     if(id64<=0 || id64>UINT32_MAX)continue;
                     auto id=static_cast<std::uint32_t>(id64);
@@ -310,9 +398,10 @@ awaitable<void> Session::run() {
     try {
         tcp::resolver resolver(co_await net::this_coro::executor);
         auto eps=co_await resolver.async_resolve(owner->target,std::to_string(port),use_awaitable);
-        if(done) co_return;
+        // Do not co_return here: it bypasses the session map cleanup below.
+        if(done) throw std::runtime_error("Session canceled before TCP connect");
         co_await net::async_connect(sock,eps,use_awaitable);
-        if(done) co_return;
+        if(done) throw std::runtime_error("Session canceled during TCP connect");
         owner->send_control("ready",id);
         auto ex=co_await net::this_coro::executor;
         net::co_spawn(ex,[self=shared_from_this()]()->awaitable<void>{co_await self->reader();},net::detached);
@@ -331,8 +420,34 @@ awaitable<void> agent_loop(Options o,ssl::context& sslctx,Url url) {
     unsigned pause=1;
     while(true) {
         try {
-            auto ws=co_await connect_wss(sslctx,url,"/agent",o.token,o.connect_host);
-            log("Agent connected; ports configured: "+std::to_string(o.ports.size()));
+            auto ws=co_await connect_wss(sslctx,url,"/agent?agent="+o.agent_id,o.token,o.connect_host,o.ws_idle_timeout);
+            // A successful HTTP 101 handshake is not sufficient: verify the Durable Object
+            // registered this WebSocket before reporting Agent online.
+            auto deadline=std::make_shared<net::steady_timer>(ex);
+            deadline->expires_after(10s);
+            deadline->async_wait([ws,deadline](beast::error_code ec) {
+                if (!ec) terminate(*ws);
+            });
+            beast::flat_buffer registration;
+            try {
+                co_await ws->async_read(registration,use_awaitable);
+            } catch (...) {
+                beast::error_code ignore;
+                deadline->cancel(ignore);
+                throw;
+            }
+            beast::error_code ignore;
+            deadline->cancel(ignore);
+            if (!ws->got_text()) throw std::runtime_error("Worker registration: expected JSON text");
+            auto initial=bytes(registration);
+            auto registrationValue=json::parse(std::string_view(
+                reinterpret_cast<char const*>(initial.data()),initial.size()));
+            auto const* registrationType=registrationValue.is_object()
+                ? registrationValue.as_object().if_contains("type") : nullptr;
+            if (!registrationType || !registrationType->is_string()
+                || registrationType->as_string() != "registered")
+                throw std::runtime_error("Worker registration rejected: "+json::serialize(registrationValue));
+            log("Agent ["+o.agent_id+"] registered with Worker; ports configured: "+std::to_string(o.ports.size()));
             pause=1;
             auto agent=std::make_shared<Agent>(std::move(ws),ex,o);
             co_await agent->receiver();
@@ -376,7 +491,7 @@ struct Proxy : std::enable_shared_from_this<Proxy> {
     }
     awaitable<void> run(ssl::context& ctx,Url url,Options o) {
         try {
-            ws=co_await connect_wss(ctx,url,"/connect?port="+std::to_string(o.remote_port),o.token,o.connect_host);
+            ws=co_await connect_wss(ctx,url,"/connect?agent="+o.agent_id+"&port="+std::to_string(o.remote_port),o.token,o.connect_host,o.ws_idle_timeout);
             beast::flat_buffer b;
             co_await ws->async_read(b,use_awaitable);
             if(!ws->got_text())throw std::runtime_error("Expected ready JSON");
@@ -402,7 +517,7 @@ awaitable<void> client_loop(Options o,ssl::context& ctx,Url url) {
     acceptor.set_option(net::socket_base::reuse_address(true));
     acceptor.bind(eps.begin()->endpoint());
     acceptor.listen();
-    log("Listening on "+o.listen_host+":"+std::to_string(o.listen_port)+" -> port "+std::to_string(o.remote_port));
+    log("Listening on "+o.listen_host+":"+std::to_string(o.listen_port)+" -> agent "+o.agent_id+" port "+std::to_string(o.remote_port));
     for(;;) {
         auto s=co_await acceptor.async_accept(use_awaitable);
         auto proxy=std::make_shared<Proxy>(std::move(s));
@@ -413,6 +528,13 @@ int main(int argc,char** argv) {
     try {
         auto o=parse(argc,argv);
         auto u=parse_url(o.url);
+        log("Native WebSocket keepalive: idle timeout="+std::to_string(o.ws_idle_timeout)+
+            "s, automatic protocol Ping enabled");
+        if(o.mode=="agent")
+            log(o.app_probe_interval ? "Application state probe: interval="+
+                std::to_string(o.app_probe_interval)+"s, response timeout="+
+                std::to_string(o.app_probe_timeout)+"s" :
+                "Application state probe DISABLED; registration acknowledgement and native keepalive remain enabled");
         if (!o.connect_host.empty())
             log("TCP endpoint override: " + o.connect_host + ":" + u.port +
                 " (TLS SNI and WebSocket Host remain " + u.host + ")");
