@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- This XML attribute was added in API 27; API 26 uses values/styles.xml. -->
+    <style name="AppTheme" parent="AppThemeBase">
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+</resources>

@@ -1,0 +1,9 @@
+Host only: JVM -> JNI -> C++ Beast/Asio/OpenSSL
+PASS JNI Client: 1MiB + four concurrent streams, exported CA trust, IP override preserves Host/SNI, byte counters
+PASS JNI TLS: rejects untrusted certificates by default
+PASS JNI TLS: rejects trusted certificate with wrong hostname
+PASS JNI Client: fragmented WebSocket binary messages with interleaved protocol Ping
+PASS JNI Client + JNI Agent: multiplexing, 3 forced Agent reconnects and new sessions after every reconnect
+PASS JNI lifecycle: same process, same port, 4 stop/start cycles while a WebSocket read is blocked
+PASS JNI pair: initial 19-byte RDP-shaped exchange, then real inner TLS and 512KiB HTTP body
+Not tested: Android/NDK APK build, real phone, Cloudflare, real RDP/CredSSP.

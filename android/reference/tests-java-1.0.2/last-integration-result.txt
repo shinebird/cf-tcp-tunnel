@@ -1,0 +1,20 @@
+PASS Client: trusted TLS, IP override retains Host/SNI, 1MiB, 4 concurrent, repeated sessions
+PASS TLS: default rejects unknown CA
+PASS TLS: trusted CA still rejects wrong hostname
+PASS TLS: explicit insecure option
+PASS Agent: 4 clients + 3 reconnects accepting new clients
+PASS Agent: port allowlist and uint32 ID
+PASS Keepalive: native
+PASS Keepalive: normal
+PASS Keepalive: wrong
+PASS Keepalive: ignore
+PASS Agent: registration ACK deadline and reconnect
+PASS Agent: replacement stops reconnect conflict
+PASS Frames: fragmentation, interleaved Ping, drain before Close
+PASS Frames: reject masked server frame
+PASS Client: ready ACK deadline
+PASS Stop: cancellation during blocked TLS handshake
+PASS RDP probe: WSS loopback, split confirmation, stages and delivered byte counters
+PASS Client: nested TLS handshake and encrypted payloads over WSS
+PASS Client: delayed partial WebSocket frame remains byte-exact
+PASS Watchdog: no Pong; blocking TLS read is cancelled by raw socket close

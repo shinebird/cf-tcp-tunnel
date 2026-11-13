@@ -1,0 +1,130 @@
+--- upstream/pc-main.cpp
++++ src/pc_core.inc
+@@ -37,7 +37,7 @@
+ constexpr std::size_t FRAME = 64 * 1024;
+ constexpr std::size_t MAX_QUEUE = 4 * 1024 * 1024;
+ 
+-void log(std::string const& s) { std::cerr << s << '\n'; }
++void log(std::string const& s) { cf_hooks::message(s); }
+ 
+ struct Options {
+     std::string mode, url, token, connect_host, agent_id="main", target_host="127.0.0.1", listen_host="127.0.0.1";
+@@ -224,7 +224,7 @@
+         if(stopped)return;
+         stopped=true;
+         out.stop();
+-        beast::error_code ignore; heartbeatTimer.cancel(ignore);
++        beast::error_code ignore; heartbeatTimer.cancel();
+         terminate(*ws);
+         auto copy=std::move(sessions);sessions.clear();
+         for(auto& [id,s]:copy) s->stop();
+@@ -323,8 +323,8 @@
+     }
+ };
+ Session::Session(std::shared_ptr<Agent> a,std::uint32_t sid,unsigned p,net::any_io_executor ex)
+-    :owner(std::move(a)),id(sid),port(p),sock(ex),pending(ex){}
+-void Session::stop() {if(done)return;done=true;pending.stop();terminate(sock);}
++    :owner(std::move(a)),id(sid),port(p),sock(ex),pending(ex){cf_hooks::session_begin();}
++void Session::stop() {if(done)return;done=true;cf_hooks::session_end();pending.stop();terminate(sock);}
+ awaitable<void> Session::reader() {
+     try {
+         std::array<unsigned char,FRAME> buf{};
+@@ -333,6 +333,7 @@
+             if(!n)break;
+             std::vector<unsigned char> part(buf.begin(),buf.begin()+n);
+             if(!owner->send(binary(with_id(id,part))))break;
++            cf_hooks::upload(n);
+         }
+     } catch(std::exception const& e) {if(!done)log("Target read: "+std::string(e.what()));}
+     stop();
+@@ -343,6 +344,7 @@
+             auto m=co_await pending.pop();
+             if(!m)break;
+             co_await net::async_write(sock,net::buffer(m->data),use_awaitable);
++            cf_hooks::download(m->data.size());
+         }
+     } catch(std::exception const& e) {if(!done)log("Target write: "+std::string(e.what()));}
+     stop();
+@@ -386,11 +388,11 @@
+                 co_await ws->async_read(registration,use_awaitable);
+             } catch (...) {
+                 beast::error_code ignore;
+-                deadline->cancel(ignore);
++                deadline->cancel();
+                 throw;
+             }
+             beast::error_code ignore;
+-            deadline->cancel(ignore);
++            deadline->cancel();
+             if (!ws->got_text()) throw std::runtime_error("Worker registration: expected JSON text");
+             auto initial=bytes(registration);
+             auto registrationValue=json::parse(std::string_view(
+@@ -403,6 +405,7 @@
+             log("Agent ["+o.agent_id+"] registered with Worker; ports configured: "+std::to_string(o.ports.size()));
+             pause=1;
+             auto agent=std::make_shared<Agent>(std::move(ws),ex,o);
++            cf_hooks::track_agent(agent);
+             co_await agent->receiver();
+         } catch(std::exception const& e) {log(std::string("Agent reconnect: ")+e.what());}
+         net::steady_timer delay(ex);
+@@ -415,9 +418,9 @@
+     tcp::socket local;
+     std::shared_ptr<Wss> ws;
+     bool stopped=false;
+-    Proxy(tcp::socket s):local(std::move(s)){}
++    Proxy(tcp::socket s):local(std::move(s)){cf_hooks::session_begin();}
+     void stop() {if(stopped)return;
+-        stopped=true;terminate(local);if(ws)terminate(*ws);}
++        stopped=true;cf_hooks::session_end();terminate(local);if(ws)terminate(*ws);}
+     awaitable<void> from_local() {
+         try {
+             std::array<unsigned char,FRAME> buf{};
+@@ -426,6 +429,7 @@
+                 if(!n)break;
+                 ws->binary(true);
+                 co_await ws->async_write(net::buffer(buf.data(),n),use_awaitable);
++                cf_hooks::upload(n);
+             }
+         } catch(std::exception const& e) {if(!stopped)log("local->Worker: "+std::string(e.what()));}
+         stop();
+@@ -438,6 +442,7 @@
+                 if(!ws->got_binary()) continue;
+                 auto v=bytes(b);
+                 co_await net::async_write(local,net::buffer(v),use_awaitable);
++                cf_hooks::download(v.size());
+             }
+         } catch(std::exception const& e) {if(!stopped)log("Worker->local: "+std::string(e.what()));}
+         stop();
+@@ -474,31 +479,7 @@
+     for(;;) {
+         auto s=co_await acceptor.async_accept(use_awaitable);
+         auto proxy=std::make_shared<Proxy>(std::move(s));
++        cf_hooks::track_proxy(proxy);
+         net::co_spawn(ex,[proxy,&ctx,url,o]()->awaitable<void>{co_await proxy->run(ctx,url,o);},net::detached);
+     }
+ }
+-int main(int argc,char** argv) {
+-    try {
+-        auto o=parse(argc,argv);
+-        auto u=parse_url(o.url);
+-        if (!o.connect_host.empty())
+-            log("TCP endpoint override: " + o.connect_host + ":" + u.port +
+-                " (TLS SNI and WebSocket Host remain " + u.host + ")");
+-        net::io_context ioc(1);
+-        ssl::context tls(ssl::context::tls_client);
+-        if (o.insecure_skip_verify) {
+-            tls.set_verify_mode(ssl::verify_none);
+-            log("WARNING: TLS certificate verification is DISABLED (--insecure-skip-verify)");
+-        } else {
+-            tls.set_default_verify_paths();
+-            tls.set_verify_mode(ssl::verify_peer);
+-        }
+-        if(o.mode=="agent")
+-            net::co_spawn(ioc,agent_loop(o,tls,u),[](std::exception_ptr e){if(e)try{std::rethrow_exception(e);}catch(std::exception const& x){log(x.what());}});
+-        else
+-            net::co_spawn(ioc,client_loop(o,tls,u),[](std::exception_ptr e){if(e)try{std::rethrow_exception(e);}catch(std::exception const& x){log(x.what());}});
+-        ioc.run();
+-    } catch(std::exception const& e) {
+-        log(std::string("Fatal: ")+e.what());return 1;
+-    }
+-}

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Shared settings are inherited by both the API 26 and API 27+ themes. -->
+    <style name="AppThemeBase" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#176BDB</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowBackground">#F4F6FA</item>
+    </style>
+
+    <!-- API 26 fallback. Do not put API 27-only attributes in this resource. -->
+    <style name="AppTheme" parent="AppThemeBase" />
+</resources>

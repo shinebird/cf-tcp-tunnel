@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lint>
+    <!-- Only the explicitly opted-in diagnostic mode uses a trust-all manager.
+         Default verification and hostname matching stay enabled and are tested.
+         Do not suppress other SSL/network checks or change the default. -->
+    <issue id="TrustAllX509TrustManager">
+        <ignore path="src/main/java/uk/ayachi/cftunnel/core/Wss.java" />
+    </issue>
+    <issue id="CustomX509TrustManager">
+        <ignore path="src/main/java/uk/ayachi/cftunnel/core/Wss.java" />
+    </issue>
+</lint>

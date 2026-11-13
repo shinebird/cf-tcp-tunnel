@@ -1,0 +1,81 @@
+plugins { id 'com.android.application' }
+
+// These are build-time choices, NOT Android runtime target changes.
+// Windows script supplies these properties; Android Studio / CI use the same defaults.
+// Keep the minor component as text until it is split; 37.0 is not an integer SDK hash.
+def tunnelCompileSdkVersion = providers.gradleProperty('cfCompileSdk').orElse('37.0').get().trim()
+if (!(tunnelCompileSdkVersion in ['36', '36.0', '37', '37.0'])) {
+    throw new GradleException('cfCompileSdk must be 36, 36.0, 37 or 37.0 with this pinned toolchain.')
+}
+def tunnelSdkParts = tunnelCompileSdkVersion.split('\\.')
+def tunnelCompileSdk = tunnelSdkParts[0].toInteger()
+def tunnelCompileSdkMinor = tunnelSdkParts.length == 2 ? tunnelSdkParts[1].toInteger() : null
+def tunnelBuildTools = providers.gradleProperty('cfBuildToolsVersion').orElse('37.0.0').get()
+if (!(tunnelBuildTools ==~ /^(36|37)\.\d+\.\d+$/)) {
+    throw new GradleException('cfBuildToolsVersion must be an installed stable 36.x.x or 37.x.x version.')
+}
+
+def nativeSelection = new Properties()
+def selectionFile = rootProject.file('.native-deps/selection.properties')
+if (selectionFile.exists()) selectionFile.withInputStream { nativeSelection.load(it) }
+def nativeDeps = providers.gradleProperty('cfNativeDeps').orElse(nativeSelection.getProperty('cfNativeDeps', rootProject.file('.native-deps/installed-direct').absolutePath)).get().replace('\\','/')
+def boostSource = providers.gradleProperty('cfBoostSource').orElse(nativeSelection.getProperty('cfBoostSource', '')).get().replace('\\','/')
+def nativeAbis = providers.gradleProperty('cfAbis').orElse('arm64-v8a').get().split(',').collect { it.trim() }
+if (nativeAbis.any { !(it in ['arm64-v8a', 'x86_64']) }) throw new GradleException('cfAbis: arm64-v8a,x86_64 only')
+
+android {
+    ndkVersion providers.gradleProperty('cfNdkVersion').orElse('30.0.16248370').get()
+    def explicitNdkPath = providers.gradleProperty('cfNdkPath').orNull
+    if (explicitNdkPath) ndkPath explicitNdkPath
+    externalNativeBuild {
+        cmake {
+            path rootProject.file('native/CMakeLists.txt')
+            version providers.gradleProperty('cfCmakeVersion').orElse('4.1.2').get()
+        }
+    }
+    namespace 'uk.ayachi.cftunnel'
+    if (tunnelCompileSdkMinor != null) {
+        // Explicitly pin the minor API, including zero. Do not use compileSdkPreview.
+        compileSdk {
+            version = release(tunnelCompileSdk) {
+                minorApiLevel = tunnelCompileSdkMinor
+            }
+        }
+    } else {
+        // Compatibility with SDKs installed under a major-only package name.
+        compileSdk = tunnelCompileSdk
+    }
+    buildToolsVersion = tunnelBuildTools
+    defaultConfig {
+        applicationId 'uk.ayachi.cftunnel'
+        ndk { abiFilters.addAll(nativeAbis) }
+        externalNativeBuild {
+            cmake {
+                arguments '-DCMAKE_BUILD_TYPE=Release', '-DANDROID_STL=c++_shared', "-DCF_NATIVE_DEPS=${nativeDeps}", "-DCF_BOOST_SOURCE=${boostSource}"
+                cppFlags '-std=c++20', '-fexceptions', '-frtti'
+            }
+        }
+        minSdk 26
+        // Do not opt in to Android 17 LAN permission changes in a build-only patch.
+        targetSdk 36
+        versionCode 6
+        versionName '1.1.2-native'
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    buildTypes {
+        debug { debuggable true }
+        release {
+            debuggable false
+            jniDebuggable false
+            minifyEnabled false
+            // Private sideload builds reuse the existing local signing key.
+            // This is not a production distribution keystore.
+            signingConfig signingConfigs.debug
+        }
+    }
+    lint { abortOnError true; checkReleaseBuilds true }
+}
+tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
