@@ -253,7 +253,7 @@ struct Agent : std::enable_shared_from_this<Agent> {
         if(stopped)return;
         stopped=true;
         out.stop();
-        beast::error_code ignore; probeTimer.cancel(ignore);
+        beast::error_code ignore; probeTimer.cancel();
         terminate(*ws);
         auto copy=std::move(sessions);sessions.clear();
         for(auto& [id,s]:copy) s->stop();
@@ -330,7 +330,7 @@ struct Agent : std::enable_shared_from_this<Agent> {
                             static_cast<std::uint64_t>(nonce->as_int64())==lastPingNonce) {
                             appProbePending=false;
                             beast::error_code ignore;
-                            probeTimer.cancel(ignore);
+                            probeTimer.cancel();
                         }
                         continue;
                     }
@@ -433,11 +433,11 @@ awaitable<void> agent_loop(Options o,ssl::context& sslctx,Url url) {
                 co_await ws->async_read(registration,use_awaitable);
             } catch (...) {
                 beast::error_code ignore;
-                deadline->cancel(ignore);
+                deadline->cancel();
                 throw;
             }
             beast::error_code ignore;
-            deadline->cancel(ignore);
+            deadline->cancel();
             if (!ws->got_text()) throw std::runtime_error("Worker registration: expected JSON text");
             auto initial=bytes(registration);
             auto registrationValue=json::parse(std::string_view(
